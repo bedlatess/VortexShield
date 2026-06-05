@@ -334,7 +334,7 @@
         <div class="eyebrow"><span></span> VortexShield Adaptive Verification</div>
         <h1>Secure login, almost invisible.</h1>
         <p class="lead">
-          低风险用户无感秒过，异常环境自动降级为复选框或滑块挑战。这个页面模拟真实业务登录流程，
+          低风险用户无感秒过，异常环境自动进入复选框或滑块校验。这个页面模拟真实业务登录流程，
           用最少的打扰换取高强度行为安全签名。
         </p>
       </section>
@@ -382,6 +382,8 @@
       const sdk = new window.CaptchaSDK({
         container: "#vsec-captcha-container",
         apiBaseUrl: "https://vsec.pawn.eu.org",
+        siteKey: "vsec_site_demo",
+        action: "login",
         onSuccess(signature) {
           signatureInput.value = signature;
           notice.className = "notice";
@@ -392,9 +394,9 @@
           notice.className = "notice";
           notice.textContent = "无感验证通过。";
         },
-        onChallengeRequired(_challenge, response) {
+        onChallengeRequired(_verification, response) {
           notice.className = "notice";
-          notice.textContent = `需要完成 ${response.data.captcha_type} 验证。`;
+          notice.textContent = `安全校验流程已升级为 ${response.data.captcha_type}。`;
         },
         onFailure(reason) {
           signatureInput.value = "";

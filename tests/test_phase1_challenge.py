@@ -10,6 +10,13 @@ from app.services.captcha_generator import generate_slider_challenge
 from app.services.session_store import session_store
 
 
+DEMO_SITE_CONTEXT = {
+    "site_key": "vsec_site_demo",
+    "action": "login",
+    "hostname": "localhost",
+}
+
+
 def _decode_data_uri(data_uri: str) -> Image.Image:
     _prefix, raw = data_uri.split(",", 1)
     return Image.open(io.BytesIO(base64.b64decode(raw)))
@@ -40,7 +47,7 @@ def test_generate_slider_challenge_returns_background_piece_and_private_answer()
 
 def test_challenge_api_returns_slider_contract_and_stores_target_x_privately() -> None:
     client = TestClient(app)
-    response = client.get("/api/captcha/challenge")
+    response = client.get("/api/captcha/challenge", params=DEMO_SITE_CONTEXT)
 
     assert response.status_code == 200
     body = response.json()
@@ -66,3 +73,11 @@ def test_challenge_api_returns_slider_contract_and_stores_target_x_privately() -
     assert session.slider_answer is not None
     assert session.slider_answer.target_x > 100
     assert "BEGIN PRIVATE KEY" in session.rsa_private_key_pem
+
+
+def test_challenge_api_rejects_missing_site_key() -> None:
+    client = TestClient(app)
+    response = client.get("/api/captcha/challenge")
+
+    assert response.status_code == 403
+    assert response.json()["msg"] == "invalid_site_key"

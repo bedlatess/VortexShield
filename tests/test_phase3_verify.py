@@ -11,7 +11,15 @@ from fastapi.testclient import TestClient
 from app.core.enums import CaptchaType
 from app.api.routes import captcha as captcha_routes
 from app.main import app
+from app.services.site_registry import DEFAULT_DEMO_SECRET
 from app.services.session_store import session_store
+
+
+DEMO_SITE_CONTEXT = {
+    "site_key": "vsec_site_demo",
+    "action": "login",
+    "hostname": "localhost",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +52,10 @@ def _encrypt_payload(plaintext: dict, rsa_public_key_pem: str) -> dict:
 
 
 def _make_challenge(client: TestClient) -> tuple[dict, object]:
-    response = client.get("/api/captcha/challenge")
+    response = client.get(
+        "/api/captcha/challenge",
+        params=DEMO_SITE_CONTEXT,
+    )
     assert response.status_code == 200
     data = response.json()["data"]
     session = session_store.get(data["captcha_token"])
@@ -54,7 +65,10 @@ def _make_challenge(client: TestClient) -> tuple[dict, object]:
 
 
 def _make_precheck_key(client: TestClient) -> dict:
-    response = client.get("/api/captcha/precheck-key")
+    response = client.get(
+        "/api/captcha/precheck-key",
+        params=DEMO_SITE_CONTEXT,
+    )
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["precheck_token"].startswith("pre_rsa_")
@@ -97,6 +111,7 @@ def _human_like_tracks(target_x: int) -> list[list[int]]:
 def _slider_plaintext(token: str, target_x: int, tracks: list[list[int]] | None = None) -> dict:
     return {
         "client_time": 1717834512000,
+        **DEMO_SITE_CONTEXT,
         "captcha_token": token,
         "captcha_type": CaptchaType.SLIDER,
         "slider_x": target_x,
@@ -108,6 +123,7 @@ def _slider_plaintext(token: str, target_x: int, tracks: list[list[int]] | None 
 def _checkbox_plaintext(token: str, tracks: list[list[int]] | None = None) -> dict:
     return {
         "client_time": 1717834512000,
+        **DEMO_SITE_CONTEXT,
         "captcha_token": token,
         "captcha_type": CaptchaType.CLICK_CHECKBOX,
         "checkbox_checked": True,
@@ -127,12 +143,14 @@ def _verify(client: TestClient, token: str, rsa_public_key_pem: str, plaintext: 
 def _precheck(client: TestClient, precheck: dict, fingerprint: dict):
     plaintext = {
         "client_time": 1717834512000,
+        **DEMO_SITE_CONTEXT,
         "fingerprint": fingerprint,
     }
     return client.post(
         "/api/captcha/precheck",
         json={
             "precheck_token": precheck["precheck_token"],
+            **DEMO_SITE_CONTEXT,
             "payload": _encrypt_payload(plaintext, precheck["rsa_public_key"]),
         },
     )
@@ -155,6 +173,21 @@ def test_precheck_low_risk_returns_silent_pass() -> None:
 
     replay = _precheck(client, precheck_key, _clean_fingerprint())
     assert replay.json()["data"]["reason"] == "precheck_expired_or_not_found"
+
+
+def test_precheck_key_requires_configured_site_key() -> None:
+    client = TestClient(app)
+
+    missing = client.get("/api/captcha/precheck-key")
+    assert missing.json()["code"] == 403
+    assert missing.json()["msg"] == "invalid_site_key"
+
+    unknown = client.get(
+        "/api/captcha/precheck-key",
+        params={"site_key": "vsec_site_missing", "action": "login", "hostname": "localhost"},
+    )
+    assert unknown.json()["code"] == 403
+    assert unknown.json()["msg"] == "invalid_site_key"
 
 
 def test_precheck_medium_risk_returns_click_checkbox_type() -> None:
@@ -262,6 +295,73 @@ def test_verify_slider_success_issues_signature_and_prevents_replay() -> None:
 
     replay = _verify(client, challenge["captcha_token"], challenge["rsa_public_key"], plaintext)
     assert replay.json()["data"]["reason"] == "challenge_expired_or_not_found"
+
+
+def test_siteverify_accepts_signature_and_consumes_it() -> None:
+    client = TestClient(app)
+    challenge, session = _make_challenge(client)
+    plaintext = _slider_plaintext(challenge["captcha_token"], session.slider_answer.target_x)
+    verify_response = _verify(client, challenge["captcha_token"], challenge["rsa_public_key"], plaintext)
+    signature = verify_response.json()["data"]["verify_signature"]
+
+    response = client.post(
+        "/api/siteverify",
+        json={
+            "secret": DEFAULT_DEMO_SECRET,
+            "response": signature,
+            "action": DEMO_SITE_CONTEXT["action"],
+            "hostname": DEMO_SITE_CONTEXT["hostname"],
+        },
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["action"] == DEMO_SITE_CONTEXT["action"]
+    assert body["hostname"] == DEMO_SITE_CONTEXT["hostname"]
+    assert body["error_codes"] == []
+    assert session_store.get_verify_signature(signature) is None
+
+    replay = client.post(
+        "/api/siteverify",
+        json={"secret": DEFAULT_DEMO_SECRET, "response": signature},
+    )
+    assert replay.json()["success"] is False
+    assert replay.json()["error_codes"] == ["invalid-or-timeout-response"]
+
+
+def test_siteverify_rejects_wrong_secret_action_and_hostname() -> None:
+    client = TestClient(app)
+
+    wrong_secret = client.post(
+        "/api/siteverify",
+        json={"secret": "wrong-secret", "response": "vsig_missing"},
+    )
+    assert wrong_secret.json()["error_codes"] == ["invalid-input-secret"]
+
+    challenge, session = _make_challenge(client)
+    plaintext = _slider_plaintext(challenge["captcha_token"], session.slider_answer.target_x)
+    verify_response = _verify(client, challenge["captcha_token"], challenge["rsa_public_key"], plaintext)
+    signature = verify_response.json()["data"]["verify_signature"]
+
+    action_mismatch = client.post(
+        "/api/siteverify",
+        json={"secret": DEFAULT_DEMO_SECRET, "response": signature, "action": "checkout"},
+    )
+    assert action_mismatch.json()["success"] is False
+    assert action_mismatch.json()["error_codes"] == ["action-mismatch"]
+
+    challenge, session = _make_challenge(client)
+    plaintext = _slider_plaintext(challenge["captcha_token"], session.slider_answer.target_x)
+    verify_response = _verify(client, challenge["captcha_token"], challenge["rsa_public_key"], plaintext)
+    signature = verify_response.json()["data"]["verify_signature"]
+
+    hostname_mismatch = client.post(
+        "/api/siteverify",
+        json={"secret": DEFAULT_DEMO_SECRET, "response": signature, "hostname": "evil.example"},
+    )
+    assert hostname_mismatch.json()["success"] is False
+    assert hostname_mismatch.json()["error_codes"] == ["hostname-mismatch"]
 
 
 def test_verify_rejects_slider_when_overlap_below_relaxed_threshold() -> None:

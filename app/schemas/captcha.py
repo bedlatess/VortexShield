@@ -48,6 +48,9 @@ class PrecheckKeyResponse(BaseModel):
 class CaptchaPrecheckRequest(BaseModel):
     precheck_token: str
     payload: str | dict[str, Any]
+    site_key: str | None = Field(default=None, description="Public site key used by third-party pages.")
+    action_name: str | None = Field(default=None, alias="action", description="Business action, e.g. login.")
+    hostname: str | None = Field(default=None, description="Browser hostname collected by the SDK.")
 
 
 class CheckboxChallengeData(BaseModel):
@@ -77,6 +80,9 @@ class CaptchaPrecheckResponse(BaseModel):
 class CaptchaVerifyRequest(BaseModel):
     captcha_token: str
     payload: str | dict[str, Any]
+    site_key: str | None = Field(default=None, description="Public site key used by third-party pages.")
+    action_name: str | None = Field(default=None, alias="action", description="Business action, e.g. login.")
+    hostname: str | None = Field(default=None, description="Browser hostname collected by the SDK.")
 
 
 class CaptchaVerifyData(BaseModel):
@@ -91,3 +97,50 @@ class CaptchaVerifyResponse(BaseModel):
     code: int
     msg: str
     data: CaptchaVerifyData
+
+
+class SiteVerifyRequest(BaseModel):
+    secret: str = Field(..., description="Private site secret. Must only be used by the business backend.")
+    response: str = Field(..., description="verify_signature returned by the browser SDK.")
+    remoteip: str | None = Field(default=None, description="Optional end-user IP address.")
+    action_name: str | None = Field(default=None, alias="action", description="Expected business action.")
+    hostname: str | None = Field(default=None, description="Expected hostname.")
+
+
+class SiteVerifyResponse(BaseModel):
+    success: bool
+    score: float | None = None
+    action: str | None = None
+    hostname: str | None = None
+    challenge_ts: str | None = None
+    error_codes: list[str] = Field(default_factory=list)
+
+
+class SiteAdminCreateRequest(BaseModel):
+    allowed_domains: list[str] = Field(..., min_length=1, description="Domains that may use this site key.")
+    allowed_actions: list[str] = Field(default_factory=lambda: ["login"], description="Allowed business actions.")
+    admin_token: str = Field(..., min_length=1, description="Admin console token.")
+
+
+class SiteAdminData(BaseModel):
+    site_key: str
+    allowed_domains: list[str]
+    allowed_actions: list[str]
+    enabled: bool
+    created_at: str
+
+
+class SiteAdminCreateData(SiteAdminData):
+    secret: str = Field(..., description="Private secret returned once at creation time.")
+
+
+class SiteAdminListResponse(BaseModel):
+    code: int = 200
+    msg: str = "success"
+    data: list[SiteAdminData]
+
+
+class SiteAdminCreateResponse(BaseModel):
+    code: int = 200
+    msg: str = "success"
+    data: SiteAdminCreateData | None = None

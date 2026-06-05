@@ -17,6 +17,10 @@ logs/*
 !logs/.gitkeep
 *.jsonl
 
+# 控制台签发的 siteKey / secret hash 运行态配置，服务器本地保存，不入库
+data/*
+!data/.gitkeep
+
 # 拦截机器学习模型：.pkl 文件属于二进制大文件，且本地训练的无需上传（可由服务器自行训练）
 models/*.pkl
 !models/.gitkeep

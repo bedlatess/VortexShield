@@ -11,14 +11,14 @@
 
 ## Overview
 
-VortexShield 是一个完整的智能行为验证码与风控验证系统。它不把“验证码”理解为一张图，而是把客户端环境、交互轨迹、加密通信、挑战降级、样本沉淀和模型训练连接成一条闭环安全链路。
+VortexShield 是一个完整的智能行为验证码与风控验证系统。它不把“验证码”理解为一张图，而是把客户端环境、交互轨迹、加密通信、安全校验编排、样本沉淀和模型训练连接成一条闭环安全链路。
 
-系统默认优先执行静默预检：可信环境直接签发短时效安全凭证；存在弱信号时降级为轻量复选框；高风险环境进入滑块拼图挑战。每一次验证都会生成可训练的轨迹样本，为后续 AI 风控模型持续进化提供数据飞轮。
+系统默认优先执行静默预检：可信环境直接签发短时效安全凭证；存在弱信号时升级为轻量复选框；高风险环境进入滑块拼合校验。每一次验证都会生成可训练的轨迹样本，为后续 AI 风控模型持续进化提供数据飞轮。
 
 ## Features
 
-- **无感多态 UI 降级**
-  Cloudflare Turnstile 级交互策略，支持 `SILENT` / `CLICK_CHECKBOX` / `SLIDER` 三态自适应切换。低风险用户无感通过，高风险请求才触发挑战，最大限度降低正常用户摩擦。
+- **无感多态安全校验编排**
+  Cloudflare Turnstile 级交互策略，支持 `SILENT` / `CLICK_CHECKBOX` / `SLIDER` 三态自适应切换。低风险用户无感通过，高风险请求才触发增强校验，最大限度降低正常用户摩擦。
 
 - **重装甲通信链路**
   前后端采用 `RSA-OAEP-2048 + AES-GCM-256` 混合加密。浏览器本地生成 AES 会话密钥，RSA 公钥只用于密钥封装，Payload 使用认证加密保护点击、拖拽轨迹与指纹数据，降低中间人篡改与重放风险。
@@ -63,13 +63,13 @@ sequenceDiagram
         SDK-->>U: Verification passed silently
     else RiskLevel.MEDIUM
         API->>STORE: Create CLICK_CHECKBOX session
-        API-->>SDK: captcha_type=CLICK_CHECKBOX<br/>challenge token + RSA public key
+        API-->>SDK: captcha_type=CLICK_CHECKBOX<br/>verification token + RSA public key
         SDK-->>U: Render checkbox widget
     else RiskLevel.HIGH
         API->>API: generate_slider_challenge()
         API->>STORE: Save target_x + RSA private key
         API-->>SDK: captcha_type=SLIDER<br/>background + piece + token
-        SDK-->>U: Render slider challenge
+        SDK-->>U: Render slider verification
     end
 
     U->>SDK: Click checkbox or drag slider
@@ -89,7 +89,7 @@ sequenceDiagram
 ```text
 VortexShield (涡流之盾)/
 ├── app/
-│   ├── api/routes/captcha.py          # precheck / challenge / verify API
+│   ├── api/routes/captcha.py          # precheck / verification / verify API
 │   ├── core/config.py                 # 全局配置，如滑块容差和 TTL
 │   ├── core/enums.py                  # CaptchaType / RiskLevel
 │   ├── schemas/captcha.py             # Pydantic API 数据结构
@@ -98,12 +98,11 @@ VortexShield (涡流之盾)/
 │       ├── crypto.py                  # RSA-OAEP + AES-GCM 解密
 │       ├── data_logger.py             # 异步轨迹 JSONL 数据飞轮
 │       ├── risk_engine.py             # 环境探针与轨迹统计风控
+│       ├── site_registry.py           # siteKey / secret 站点注册表
 │       └── session_store.py           # Mock Session Store
 ├── frontend/
 │   ├── src/vsec-sdk.ts                # 原生 TypeScript SDK
 │   ├── dist/vsec-sdk.js               # 浏览器可直接加载的 SDK
-│   ├── index.html                     # SDK 调试页
-│   └── test-app.js                    # 本地联调脚本
 ├── demo/login.html                    # 真实业务登录页仿真
 ├── logs/trajectory_data.jsonl         # 轨迹样本沉淀
 ├── models/vsec_rf_model.pkl           # 随机森林风控模型
@@ -148,7 +147,22 @@ API docs:
 http://127.0.0.1:48921/docs
 ```
 
-### 3. Open SDK Debug Page
+Product home:
+
+```text
+http://127.0.0.1:48921/home
+```
+
+API console:
+
+```text
+http://127.0.0.1:48921/home/api
+```
+
+本地演示后台令牌为 `vsec_admin_demo`。生产部署请设置环境变量 `VSEC_ADMIN_TOKEN`
+为高强度随机值，否则不要开放 `/home/api` 到公网。
+
+### 3. Open Business Login Demo
 
 ```powershell
 .\run_frontend.ps1
@@ -157,12 +171,10 @@ http://127.0.0.1:48921/docs
 访问：
 
 ```text
-http://127.0.0.1:48922/
+http://127.0.0.1:48923/demo/login.html
 ```
 
-### 4. Open Business Login Demo
-
-登录页位于项目根目录下的 `demo/login.html`，建议用独立静态端口启动：
+也可以手动启动静态服务：
 
 ```powershell
 .\.venv\Scripts\python.exe -m http.server 48923 --bind 127.0.0.1 --directory .
@@ -174,19 +186,63 @@ http://127.0.0.1:48922/
 http://127.0.0.1:48923/demo/login.html
 ```
 
+### 4. Integrate Like Turnstile
+
+先进入 `/home/api` 创建业务站点 API，拿到公开 `siteKey` 和私有 `secret`。
+没有后台创建的 `siteKey`，即使前端加载 SDK，也会收到 `invalid_site_key`，无法使用 VortexShield。
+
+前端只需要在业务站点自托管 `frontend/dist/vsec-sdk.js`，并配置公开 `siteKey`：
+
+```html
+<div id="vsec-captcha"></div>
+<script src="/vsec-sdk.js"></script>
+<script>
+  const captcha = new window.CaptchaSDK({
+    container: "#vsec-captcha",
+    apiBaseUrl: "https://vsec.pawn.eu.org",
+    siteKey: "vsec_site_demo",
+    action: "login",
+    onSuccess(signature) {
+      document.querySelector("#vsec_signature").value = signature;
+    },
+  });
+  captcha.execute();
+</script>
+```
+
+业务后端拿到表单里的 `verify_signature` 后，使用私有 `secret` 调用 `/api/siteverify`：
+
+```bash
+curl -X POST https://vsec.pawn.eu.org/api/siteverify \
+  -H "Content-Type: application/json" \
+  -d '{"secret":"vsec_secret_demo","response":"vsig_xxx","action":"login","hostname":"localhost"}'
+```
+
+演示凭据仅用于本地和上线探针：
+
+```text
+siteKey = vsec_site_demo
+secret  = vsec_secret_demo
+```
+
 ## API Surface
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/captcha/precheck-key` | 下发预检 RSA 公钥与短时效 precheck token |
 | `POST` | `/api/captcha/precheck` | 静默环境风控，返回 `SILENT` / `CLICK_CHECKBOX` / `SLIDER` |
-| `GET` | `/api/captcha/challenge` | 显式创建滑块挑战，主要用于调试和强制降级 |
+| `GET` | `/api/captcha/challenge` | 显式创建滑块拼合校验流程，主要用于调试和高风险升级 |
 | `POST` | `/api/captcha/verify` | 解密 Payload，校验滑块精度与轨迹风险，签发 `verify_signature` |
+| `POST` | `/api/siteverify` | 业务后端使用私有 `secret` 校验并一次性消费 `verify_signature` |
+| `GET` | `/home` | VortexShield 产品首页 |
+| `GET` | `/home/api` | API 创建与站点管理后台 |
+| `GET` | `/home/api/sites` | 列出已配置站点 API |
+| `POST` | `/home/api/sites` | 创建站点 API，返回一次性展示的私有 `secret` |
 | `GET` | `/health` | 服务健康检查 |
 
 ## Docker Deployment
 
-生产容器使用 `python:3.11-slim`，Uvicorn 绑定 `0.0.0.0:48921` 并启用 4 workers。
+生产容器使用 `python:3.11-slim`，Uvicorn 绑定 `0.0.0.0:48921`。当前版本的验证码 Session/RSA 私钥仍在进程内存中，默认使用单 worker 保证 precheck -> verify 链路稳定；横向扩展前请先切换 Redis Session Store。
 
 ```powershell
 docker compose up -d --build
@@ -211,7 +267,7 @@ docker compose down
 docker compose --profile redis up -d
 ```
 
-当前版本默认使用内存 Mock Session Store；生产多副本部署时建议切换为 Redis / Redis Cluster / DynamoDB 等集中式会话存储。
+当前版本的验证码会话默认使用内存 Mock Session Store；生产多副本部署时建议切换为 Redis / Redis Cluster / DynamoDB 等集中式会话存储。控制台创建的站点 API 会持久化到 `data/site_registry.json`，Docker Compose 已挂载 `./data:/app/data`，避免服务重启后接入凭证丢失。
 
 ## Red Team Simulation
 
@@ -279,7 +335,7 @@ models/vsec_rf_model.pkl
 - Captcha token 校验通过后立即销毁，降低重放窗口。
 - AES-GCM 提供机密性与完整性认证，Payload 被篡改会解密失败。
 - RSA 私钥只保存在服务端 Session Store 中，客户端只接触公钥。
-- 滑块挑战不仅校验 `slider_x` 精度，还继续校验拖拽轨迹，防御图像识别后接口代滑。
+- 滑块拼合校验不仅校验 `slider_x` 精度，还继续校验拖拽轨迹，防御图像识别后接口代滑。
 - JSONL 数据飞轮已做基础指纹脱敏，生产环境仍建议接入数据分级、访问审计和保留周期策略。
 
 ## Testing

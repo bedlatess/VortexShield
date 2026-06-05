@@ -11,15 +11,18 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
+      VSEC_SITE_REGISTRY_PATH: "/app/data/site_registry.json"
       # Future Redis migration hook:
       # VSEC_SESSION_BACKEND: "redis"
       # REDIS_URL: "redis://redis:6379/0"
+    volumes:
+      - ./data:/app/data
     # depends_on:
     #   - redis
 
   # Optional centralized session store for production clusters.
-  # The current code uses an in-memory Mock Session Store; keep this block ready
-  # for the Redis-backed store migration.
+  # The current captcha/RSA session code uses an in-memory Mock Session Store;
+  # keep this block ready for the Redis-backed store migration.
   redis:
     image: redis:7-alpine
     container_name: vortexshield-redis
@@ -34,4 +37,3 @@ services:
 
 volumes:
   redis-data:
-

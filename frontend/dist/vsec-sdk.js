@@ -12,8 +12,8 @@ const I18N = {
         idleTitle: "等待安全验证",
         idleSubtitle: "VortexShield 将自动选择验证方式",
         verifying: "安全验证中...",
-        fetchingChallenge: "正在获取挑战...",
-        refreshingChallenge: "正在刷新挑战...",
+        fetchingChallenge: "正在准备安全校验...",
+        refreshingChallenge: "正在更新校验流程...",
         evaluating: "正在评估浏览器环境与会话完整性",
         passed: "✅ 验证通过",
         passedSubtitle: "行为可信，已完成无感校验",
@@ -23,15 +23,15 @@ const I18N = {
         sliderTrack: "按住滑块，拖动完成拼图",
         sliderAria: "拖动滑块完成验证",
         failedTitle: "验证失败，请重试",
-        failedSubtitle: "正在刷新挑战",
+        failedSubtitle: "正在更新校验流程",
     },
     en: {
         ariaLabel: "VortexShield security verification",
         idleTitle: "Waiting for verification",
         idleSubtitle: "VortexShield will choose the verification mode",
         verifying: "Verifying...",
-        fetchingChallenge: "Loading challenge...",
-        refreshingChallenge: "Refreshing challenge...",
+        fetchingChallenge: "Preparing verification...",
+        refreshingChallenge: "Updating verification flow...",
         evaluating: "Checking browser environment and session integrity",
         passed: "✅ Verification passed",
         passedSubtitle: "Trusted behavior confirmed",
@@ -41,7 +41,7 @@ const I18N = {
         sliderTrack: "Hold and drag to complete the puzzle",
         sliderAria: "Drag the slider to verify",
         failedTitle: "Verification failed, try again",
-        failedSubtitle: "Refreshing challenge",
+        failedSubtitle: "Updating verification flow",
     },
 };
 class CaptchaSDK {
@@ -67,6 +67,12 @@ class CaptchaSDK {
         ensureSDKStyles();
         this.container = this.resolveContainer(options.container);
         this.apiBaseUrl = options.apiBaseUrl.replace(/\/$/, "");
+        this.siteKey = String(options.siteKey || "").trim();
+        if (!this.siteKey) {
+            throw new Error("VortexShield API 未配置：请在后台创建 API 并传入 siteKey。");
+        }
+        this.actionName = options.action || "login";
+        this.hostname = window.location.hostname || "localhost";
         this.simulateBot = options.simulateBot ?? false;
         this.onSilentPass = options.onSilentPass;
         this.onChallengeRequired = options.onChallengeRequired;
@@ -102,6 +108,9 @@ class CaptchaSDK {
             const precheckKey = await this.fetchPrecheckKey();
             const encrypted = await this.encryptHybridPayload({
                 client_time: Date.now(),
+                site_key: this.siteKey,
+                action: this.actionName,
+                hostname: this.hostname,
                 fingerprint,
             }, precheckKey.rsa_public_key);
             const response = await fetch(`${this.apiBaseUrl}/api/captcha/precheck`, {
@@ -112,6 +121,9 @@ class CaptchaSDK {
                 },
                 body: JSON.stringify({
                     precheck_token: precheckKey.precheck_token,
+                    site_key: this.siteKey,
+                    action: this.actionName,
+                    hostname: this.hostname,
                     payload: encrypted,
                 }),
             });
@@ -325,12 +337,15 @@ class CaptchaSDK {
         if (!this.checkboxChallenge?.captcha_token || !this.checkboxChallenge.rsa_public_key) {
             await this.failAndRefresh("checkbox_token_unavailable", {
                 code: 409,
-                msg: "checkbox challenge is missing token or RSA public key",
+                msg: "checkbox verification is missing token or RSA public key",
             });
             return;
         }
         const plaintext = {
             client_time: Date.now(),
+            site_key: this.siteKey,
+            action: this.actionName,
+            hostname: this.hostname,
             captcha_token: this.checkboxChallenge.captcha_token,
             captcha_type: "CLICK_CHECKBOX",
             checkbox_checked: true,
@@ -347,13 +362,16 @@ class CaptchaSDK {
     }
     async submitSliderVerify() {
         if (!this.challenge) {
-            await this.failAndRefresh("slider_challenge_missing", null);
+            await this.failAndRefresh("slider_verification_missing", null);
             return;
         }
         this.setState("verifying");
         this.root.classList.add("is-verifying");
         const plaintext = {
             client_time: Date.now(),
+            site_key: this.siteKey,
+            action: this.actionName,
+            hostname: this.hostname,
             captcha_token: this.challenge.captcha_token,
             captcha_type: "SLIDER",
             slider_x: Math.round(this.sliderX * 1000) / 1000,
@@ -379,6 +397,9 @@ class CaptchaSDK {
                 },
                 body: JSON.stringify({
                     captcha_token: bundle.captcha_token,
+                    site_key: this.siteKey,
+                    action: this.actionName,
+                    hostname: this.hostname,
                     payload: bundle.encrypted,
                 }),
             });
@@ -428,21 +449,21 @@ class CaptchaSDK {
     `;
     }
     async fetchSliderChallenge() {
-        const response = await fetch(`${this.apiBaseUrl}/api/captcha/challenge`, {
+        const response = await fetch(this.buildURL("/api/captcha/challenge"), {
             method: "GET",
             headers: { Accept: "application/json" },
         });
         if (!response.ok) {
-            throw new Error(`Challenge request failed: ${response.status}`);
+            throw new Error(`Verification request failed: ${response.status}`);
         }
         const body = (await response.json());
         if (body.code !== 200 || !isSliderChallenge(body.data)) {
-            throw new Error(`Unexpected challenge response: ${body.msg || "unknown"}`);
+            throw new Error(`Unexpected verification response: ${body.msg || "unknown"}`);
         }
         return body.data;
     }
     async fetchPrecheckKey() {
-        const response = await fetch(`${this.apiBaseUrl}/api/captcha/precheck-key`, {
+        const response = await fetch(this.buildURL("/api/captcha/precheck-key"), {
             method: "GET",
             headers: { Accept: "application/json" },
         });
@@ -454,6 +475,13 @@ class CaptchaSDK {
             throw new Error(`Unexpected precheck-key response: ${body.msg || "unknown"}`);
         }
         return body.data;
+    }
+    buildURL(path) {
+        const url = new URL(`${this.apiBaseUrl}${path}`);
+        url.searchParams.set("site_key", this.siteKey);
+        url.searchParams.set("action", this.actionName);
+        url.searchParams.set("hostname", this.hostname);
+        return url.toString();
     }
     computeSliderBounds() {
         if (!this.sliderTrack || !this.challenge) {

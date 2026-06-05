@@ -76,10 +76,16 @@ interface CaptchaFingerprint {
 }
 interface PrecheckPlainPayload {
     client_time: number;
+    site_key: string;
+    action: string;
+    hostname: string;
     fingerprint: CaptchaFingerprint;
 }
 interface VerifyPlainPayload {
     client_time: number;
+    site_key: string;
+    action: string;
+    hostname: string;
     captcha_token: string;
     captcha_type: CaptchaType;
     tracks: TrackPoint[];
@@ -105,6 +111,8 @@ interface CaptchaSubmitBundle {
 interface CaptchaSDKOptions {
     container: HTMLElement | string;
     apiBaseUrl: string;
+    siteKey: string;
+    action?: string;
     simulateBot?: boolean;
     onSilentPass?: (signature: string, response: PrecheckResponse) => void;
     onChallengeRequired?: (challenge: ChallengeData, response: PrecheckResponse) => void;
@@ -127,8 +135,8 @@ declare const I18N: {
         readonly idleTitle: "等待安全验证";
         readonly idleSubtitle: "VortexShield 将自动选择验证方式";
         readonly verifying: "安全验证中...";
-        readonly fetchingChallenge: "正在获取挑战...";
-        readonly refreshingChallenge: "正在刷新挑战...";
+        readonly fetchingChallenge: "正在准备安全校验...";
+        readonly refreshingChallenge: "正在更新校验流程...";
         readonly evaluating: "正在评估浏览器环境与会话完整性";
         readonly passed: "✅ 验证通过";
         readonly passedSubtitle: "行为可信，已完成无感校验";
@@ -138,15 +146,15 @@ declare const I18N: {
         readonly sliderTrack: "按住滑块，拖动完成拼图";
         readonly sliderAria: "拖动滑块完成验证";
         readonly failedTitle: "验证失败，请重试";
-        readonly failedSubtitle: "正在刷新挑战";
+        readonly failedSubtitle: "正在更新校验流程";
     };
     readonly en: {
         readonly ariaLabel: "VortexShield security verification";
         readonly idleTitle: "Waiting for verification";
         readonly idleSubtitle: "VortexShield will choose the verification mode";
         readonly verifying: "Verifying...";
-        readonly fetchingChallenge: "Loading challenge...";
-        readonly refreshingChallenge: "Refreshing challenge...";
+        readonly fetchingChallenge: "Preparing verification...";
+        readonly refreshingChallenge: "Updating verification flow...";
         readonly evaluating: "Checking browser environment and session integrity";
         readonly passed: "✅ Verification passed";
         readonly passedSubtitle: "Trusted behavior confirmed";
@@ -156,12 +164,15 @@ declare const I18N: {
         readonly sliderTrack: "Hold and drag to complete the puzzle";
         readonly sliderAria: "Drag the slider to verify";
         readonly failedTitle: "Verification failed, try again";
-        readonly failedSubtitle: "Refreshing challenge";
+        readonly failedSubtitle: "Updating verification flow";
     };
 };
 declare class CaptchaSDK {
     private readonly container;
     private readonly apiBaseUrl;
+    private readonly siteKey;
+    private readonly actionName;
+    private readonly hostname;
     private readonly onSilentPass?;
     private readonly onChallengeRequired?;
     private readonly onReady?;
@@ -210,6 +221,7 @@ declare class CaptchaSDK {
     private renderFailure;
     private fetchSliderChallenge;
     private fetchPrecheckKey;
+    private buildURL;
     private computeSliderBounds;
     private applySliderX;
     private clampSliderX;

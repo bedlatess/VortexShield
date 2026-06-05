@@ -28,6 +28,9 @@ class CaptchaSession:
     height: int
     slider_answer: SliderAnswer | None
     expires_at: datetime
+    site_key: str | None = None
+    action: str | None = None
+    hostname: str | None = None
 
     def is_expired(self, now: datetime | None = None) -> bool:
         current = now or datetime.now(timezone.utc)
@@ -39,6 +42,9 @@ class PrecheckSession:
     precheck_token: str
     rsa_private_key_pem: str
     expires_at: datetime
+    site_key: str | None = None
+    action: str | None = None
+    hostname: str | None = None
 
     def is_expired(self, now: datetime | None = None) -> bool:
         current = now or datetime.now(timezone.utc)
@@ -51,6 +57,10 @@ class VerifySignatureSession:
     captcha_token: str
     risk_score: float
     expires_at: datetime
+    site_key: str | None = None
+    action: str | None = None
+    hostname: str | None = None
+    issued_at: datetime | None = None
 
     def is_expired(self, now: datetime | None = None) -> bool:
         current = now or datetime.now(timezone.utc)
@@ -81,6 +91,9 @@ class InMemoryCaptchaSessionStore:
         height: int,
         ttl_seconds: int,
         slider_answer: SliderAnswer | None = None,
+        site_key: str | None = None,
+        action: str | None = None,
+        hostname: str | None = None,
     ) -> CaptchaSession:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
         session = CaptchaSession(
@@ -92,6 +105,9 @@ class InMemoryCaptchaSessionStore:
             height=height,
             slider_answer=slider_answer,
             expires_at=expires_at,
+            site_key=site_key,
+            action=action,
+            hostname=hostname,
         )
         with self._lock:
             self._sessions[captcha_token] = session
@@ -117,12 +133,18 @@ class InMemoryCaptchaSessionStore:
         precheck_token: str,
         rsa_private_key_pem: str,
         ttl_seconds: int,
+        site_key: str | None = None,
+        action: str | None = None,
+        hostname: str | None = None,
     ) -> PrecheckSession:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
         session = PrecheckSession(
             precheck_token=precheck_token,
             rsa_private_key_pem=rsa_private_key_pem,
             expires_at=expires_at,
+            site_key=site_key,
+            action=action,
+            hostname=hostname,
         )
         with self._lock:
             self._precheck_sessions[precheck_token] = session
@@ -144,13 +166,21 @@ class InMemoryCaptchaSessionStore:
         captcha_token: str,
         risk_score: float,
         ttl_seconds: int,
+        site_key: str | None = None,
+        action: str | None = None,
+        hostname: str | None = None,
     ) -> VerifySignatureSession:
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+        issued_at = datetime.now(timezone.utc)
+        expires_at = issued_at + timedelta(seconds=ttl_seconds)
         session = VerifySignatureSession(
             verify_signature=verify_signature,
             captcha_token=captcha_token,
             risk_score=risk_score,
             expires_at=expires_at,
+            site_key=site_key,
+            action=action,
+            hostname=hostname,
+            issued_at=issued_at,
         )
         with self._lock:
             self._verify_signatures[verify_signature] = session
@@ -163,6 +193,21 @@ class InMemoryCaptchaSessionStore:
                 return None
             if session.is_expired():
                 self._verify_signatures.pop(verify_signature, None)
+                return None
+            return session
+
+    def consume_verify_signature(self, verify_signature: str) -> VerifySignatureSession | None:
+        """一次性消费业务验签凭证。
+
+        verify_signature 类似 Turnstile response token。业务后端调用 /api/siteverify
+        成功或失败后都不应允许再次复用，因此这里直接 pop，天然防重放。
+        """
+
+        with self._lock:
+            session = self._verify_signatures.pop(verify_signature, None)
+            if session is None:
+                return None
+            if session.is_expired():
                 return None
             return session
 

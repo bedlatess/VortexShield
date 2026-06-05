@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any, Deque
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
@@ -23,6 +23,8 @@ from app.schemas.captcha import (
     CheckboxChallengeData,
     PrecheckKeyData,
     PrecheckKeyResponse,
+    SiteVerifyRequest,
+    SiteVerifyResponse,
     SliderPieceSize,
 )
 from app.services.captcha_generator import generate_slider_challenge
@@ -30,9 +32,17 @@ from app.services.crypto import PayloadDecryptError, decrypt_hybrid_payload, gen
 from app.services.data_logger import log_trajectory_event_async
 from app.services.risk_engine import evaluate_environment, extract_trajectory_features
 from app.services.session_store import SliderAnswer, session_store
+from app.services.site_registry import (
+    DEFAULT_DEMO_ACTION,
+    DEFAULT_DEMO_HOSTNAME,
+    normalize_action,
+    normalize_hostname,
+    site_registry,
+)
 
 
 router = APIRouter()
+siteverify_router = APIRouter()
 settings = get_settings()
 
 PIECE_WIDTH = 53.0
@@ -46,12 +56,24 @@ _verify_rate_buckets: dict[str, Deque[float]] = defaultdict(deque)
 
 
 @router.get("/precheck-key", response_model=PrecheckKeyResponse)
-def create_precheck_key() -> PrecheckKeyResponse:
+def create_precheck_key(
+    site_key: str = Query(default=""),
+    action: str = Query(default=DEFAULT_DEMO_ACTION),
+    hostname: str = Query(default=DEFAULT_DEMO_HOSTNAME),
+) -> PrecheckKeyResponse:
     """下发静默预检 RSA 公钥。
 
     公钥只用于加密 fingerprint；私钥短时保存在 precheck session 中，并在 /precheck
     消费后立即删除，降低重放和密钥复用风险。
     """
+
+    context = _validate_site_context(site_key=site_key, action=action, hostname=hostname)
+    if not context["ok"]:
+        return PrecheckKeyResponse(
+            code=403,
+            msg=str(context["reason"]),
+            data=PrecheckKeyData(precheck_token="", rsa_public_key=""),
+        )
 
     rsa_private_key_pem, rsa_public_key_pem = generate_rsa_key_pair()
     precheck_token = f"pre_rsa_{secrets.token_hex(16)}"
@@ -59,6 +81,9 @@ def create_precheck_key() -> PrecheckKeyResponse:
         precheck_token=precheck_token,
         rsa_private_key_pem=rsa_private_key_pem,
         ttl_seconds=settings.challenge_ttl_seconds,
+        site_key=str(context["site_key"]),
+        action=str(context["action"]),
+        hostname=str(context["hostname"]),
     )
     session_store.prune_expired()
     return PrecheckKeyResponse(
@@ -75,7 +100,7 @@ def precheck_captcha(request: CaptchaPrecheckRequest) -> CaptchaPrecheckResponse
 
     - RiskLevel.LOW -> CaptchaType.SILENT：直接签发 verify_signature。
     - RiskLevel.MEDIUM -> CaptchaType.CLICK_CHECKBOX：返回轻交互复选框类型。
-    - RiskLevel.HIGH -> CaptchaType.SLIDER：返回滑块拼图挑战。
+    - RiskLevel.HIGH -> CaptchaType.SLIDER：返回滑块拼合校验流程。
     """
 
     precheck_session = session_store.consume_precheck(request.precheck_token)
@@ -86,6 +111,14 @@ def precheck_captcha(request: CaptchaPrecheckRequest) -> CaptchaPrecheckResponse
         plaintext = decrypt_hybrid_payload(request.payload, precheck_session.rsa_private_key_pem)
     except PayloadDecryptError:
         return _precheck_failed("precheck_payload_decrypt_failed")
+
+    site_context = _resolve_site_context(
+        plaintext=plaintext,
+        request_model=request,
+        session=precheck_session,
+    )
+    if not site_context["ok"]:
+        return _precheck_failed(str(site_context["reason"]))
 
     fingerprint = plaintext.get("fingerprint")
     if not isinstance(fingerprint, dict):
@@ -101,6 +134,9 @@ def precheck_captcha(request: CaptchaPrecheckRequest) -> CaptchaPrecheckResponse
         verify_signature = _issue_verify_signature(
             captcha_token=f"precheck:{request.precheck_token}",
             risk_score=risk_score,
+            site_key=str(site_context["site_key"]),
+            action=str(site_context["action"]),
+            hostname=str(site_context["hostname"]),
         )
         return CaptchaPrecheckResponse(
             code=200,
@@ -118,7 +154,7 @@ def precheck_captcha(request: CaptchaPrecheckRequest) -> CaptchaPrecheckResponse
         )
 
     if risk_level == RiskLevel.MEDIUM:
-        checkbox_data = _create_checkbox_challenge_data()
+        checkbox_data = _create_checkbox_challenge_data(site_context=site_context)
         return CaptchaPrecheckResponse(
             code=200,
             msg="checkbox_required",
@@ -134,7 +170,7 @@ def precheck_captcha(request: CaptchaPrecheckRequest) -> CaptchaPrecheckResponse
             ),
         )
 
-    challenge_data = _create_slider_challenge_data()
+    challenge_data = _create_slider_challenge_data(site_context=site_context)
     return CaptchaPrecheckResponse(
         code=200,
         msg="slider_required",
@@ -152,10 +188,20 @@ def precheck_captcha(request: CaptchaPrecheckRequest) -> CaptchaPrecheckResponse
 
 
 @router.get("/challenge", response_model=CaptchaChallengeResponse)
-def create_captcha_challenge() -> CaptchaChallengeResponse:
-    """显式创建滑块挑战，主要用于本地调试和高风险降级路径。"""
+def create_captcha_challenge(
+    site_key: str = Query(default=""),
+    action: str = Query(default=DEFAULT_DEMO_ACTION),
+    hostname: str = Query(default=DEFAULT_DEMO_HOSTNAME),
+) -> CaptchaChallengeResponse | JSONResponse:
+    """显式创建滑块拼合校验流程，主要用于本地调试和高风险升级路径。"""
 
-    return CaptchaChallengeResponse(data=_create_slider_challenge_data())
+    site_context = _validate_site_context(site_key=site_key, action=action, hostname=hostname)
+    if not site_context["ok"]:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"code": 403, "msg": str(site_context["reason"]), "data": None},
+        )
+    return CaptchaChallengeResponse(data=_create_slider_challenge_data(site_context=site_context))
 
 
 @router.post("/verify", response_model=CaptchaVerifyResponse)
@@ -163,7 +209,7 @@ def verify_captcha(
     payload: CaptchaVerifyRequest,
     request: Request,
 ) -> CaptchaVerifyResponse | JSONResponse:
-    """校验 step-up challenge。
+    """校验 step-up 安全流程。
 
     Phase 6 已废弃旧版“四字符点选顺序”方案。本接口现在只接受滑块类 payload：
     {
@@ -232,11 +278,29 @@ def verify_captcha(
             features={"payload_type": captcha_type, "session_type": session.captcha_type},
         )
 
+    site_context = _resolve_site_context(
+        plaintext=plaintext,
+        request_model=payload,
+        session=session,
+    )
+    if not site_context["ok"]:
+        return _verify_failed_with_log(
+            str(site_context["reason"]),
+            captcha_type=captcha_type,
+            plaintext=plaintext,
+            features={"site_key": plaintext.get("site_key"), "hostname": plaintext.get("hostname")},
+        )
+
     if captcha_type == CaptchaType.SILENT:
-        return _verify_silent_challenge(payload.captcha_token)
+        return _verify_silent_challenge(payload.captcha_token, site_context=site_context)
 
     if captcha_type == CaptchaType.CLICK_CHECKBOX:
-        return _verify_checkbox_challenge(payload.captcha_token, plaintext, captcha_type)
+        return _verify_checkbox_challenge(
+            payload.captcha_token,
+            plaintext,
+            captcha_type,
+            site_context=site_context,
+        )
 
     if captcha_type != CaptchaType.SLIDER or session.slider_answer is None:
         return _verify_failed_with_log(
@@ -290,6 +354,9 @@ def verify_captcha(
     verify_signature = _issue_verify_signature(
         captcha_token=payload.captcha_token,
         risk_score=float(risk_result["risk_score"]),
+        site_key=str(site_context["site_key"]),
+        action=str(site_context["action"]),
+        hostname=str(site_context["hostname"]),
     )
     session_store.delete(payload.captcha_token)
     session_store.prune_expired()
@@ -304,14 +371,81 @@ def verify_captcha(
     )
 
 
-def _verify_silent_challenge(captcha_token: str) -> CaptchaVerifyResponse:
+@siteverify_router.post("/siteverify", response_model=SiteVerifyResponse)
+def siteverify(request: SiteVerifyRequest) -> SiteVerifyResponse:
+    """业务后端验签接口，模拟 Cloudflare Turnstile / reCAPTCHA siteverify。
+
+    浏览器 SDK 只能拿到短时效 verify_signature；真正的登录/注册业务必须由业务后端
+    携带私有 secret 调用本接口。验证成功后 token 会被一次性消费，避免重放攻击。
+    """
+
+    site = site_registry.find_by_secret(request.secret)
+    if site is None or not site.enabled:
+        return SiteVerifyResponse(success=False, error_codes=["invalid-input-secret"])
+
+    signature_session = session_store.consume_verify_signature(request.response)
+    if signature_session is None:
+        return SiteVerifyResponse(success=False, error_codes=["invalid-or-timeout-response"])
+
+    challenge_ts = _format_challenge_ts(signature_session.issued_at)
+    if signature_session.site_key != site.site_key:
+        return SiteVerifyResponse(
+            success=False,
+            score=signature_session.risk_score,
+            action=signature_session.action,
+            hostname=signature_session.hostname,
+            challenge_ts=challenge_ts,
+            error_codes=["sitekey-secret-mismatch"],
+        )
+
+    if request.action_name is not None and normalize_action(request.action_name) != signature_session.action:
+        return SiteVerifyResponse(
+            success=False,
+            score=signature_session.risk_score,
+            action=signature_session.action,
+            hostname=signature_session.hostname,
+            challenge_ts=challenge_ts,
+            error_codes=["action-mismatch"],
+        )
+
+    if request.hostname is not None and normalize_hostname(request.hostname) != signature_session.hostname:
+        return SiteVerifyResponse(
+            success=False,
+            score=signature_session.risk_score,
+            action=signature_session.action,
+            hostname=signature_session.hostname,
+            challenge_ts=challenge_ts,
+            error_codes=["hostname-mismatch"],
+        )
+
+    return SiteVerifyResponse(
+        success=True,
+        score=signature_session.risk_score,
+        action=signature_session.action,
+        hostname=signature_session.hostname,
+        challenge_ts=challenge_ts,
+        error_codes=[],
+    )
+
+
+def _verify_silent_challenge(
+    captcha_token: str,
+    *,
+    site_context: dict[str, Any],
+) -> CaptchaVerifyResponse:
     """SILENT 二次确认/续签。
 
     能拿到 SILENT token 的请求已经在 precheck 阶段被评估为低风险；这里仅签发短时
     verify_signature 并销毁当前 token，避免重复使用。
     """
 
-    verify_signature = _issue_verify_signature(captcha_token=captcha_token, risk_score=0.05)
+    verify_signature = _issue_verify_signature(
+        captcha_token=captcha_token,
+        risk_score=0.05,
+        site_key=str(site_context["site_key"]),
+        action=str(site_context["action"]),
+        hostname=str(site_context["hostname"]),
+    )
     session_store.delete(captcha_token)
     session_store.prune_expired()
     return _verify_success_response(
@@ -323,7 +457,7 @@ def _verify_silent_challenge(captcha_token: str) -> CaptchaVerifyResponse:
     )
 
 
-def _create_checkbox_challenge_data() -> CheckboxChallengeData:
+def _create_checkbox_challenge_data(*, site_context: dict[str, Any]) -> CheckboxChallengeData:
     rsa_private_key_pem, rsa_public_key_pem = generate_rsa_key_pair()
     captcha_token = f"cbx_rsa_{secrets.token_hex(16)}"
     prompt = "请点击复选框完成安全确认"
@@ -337,6 +471,9 @@ def _create_checkbox_challenge_data() -> CheckboxChallengeData:
         height=72,
         slider_answer=None,
         ttl_seconds=settings.challenge_ttl_seconds,
+        site_key=str(site_context["site_key"]),
+        action=str(site_context["action"]),
+        hostname=str(site_context["hostname"]),
     )
     session_store.prune_expired()
 
@@ -348,7 +485,7 @@ def _create_checkbox_challenge_data() -> CheckboxChallengeData:
     )
 
 
-def _create_slider_challenge_data() -> CaptchaChallengeData:
+def _create_slider_challenge_data(*, site_context: dict[str, Any]) -> CaptchaChallengeData:
     challenge = generate_slider_challenge(
         width=settings.captcha_width,
         height=settings.captcha_height,
@@ -372,6 +509,9 @@ def _create_slider_challenge_data() -> CaptchaChallengeData:
             shape=challenge.shape,
         ),
         ttl_seconds=settings.challenge_ttl_seconds,
+        site_key=str(site_context["site_key"]),
+        action=str(site_context["action"]),
+        hostname=str(site_context["hostname"]),
     )
     session_store.prune_expired()
 
@@ -393,8 +533,10 @@ def _verify_checkbox_challenge(
     captcha_token: str,
     plaintext: dict[str, Any],
     captcha_type: CaptchaType,
+    *,
+    site_context: dict[str, Any],
 ) -> CaptchaVerifyResponse:
-    """校验轻交互复选框挑战。
+    """校验轻交互复选框安全确认。
 
     复选框不做空间答案校验，但仍要求：
     - payload 经过当前 session 的 RSA+AES 混合加密链路；
@@ -422,6 +564,9 @@ def _verify_checkbox_challenge(
     verify_signature = _issue_verify_signature(
         captcha_token=captcha_token,
         risk_score=float(risk_result["risk_score"]),
+        site_key=str(site_context["site_key"]),
+        action=str(site_context["action"]),
+        hostname=str(site_context["hostname"]),
     )
     session_store.delete(captcha_token)
     session_store.prune_expired()
@@ -581,13 +726,83 @@ def _evaluate_tracks_or_fail(
     }
 
 
-def _issue_verify_signature(*, captcha_token: str, risk_score: float) -> str:
+def _resolve_site_context(
+    *,
+    plaintext: dict[str, Any],
+    request_model: CaptchaPrecheckRequest | CaptchaVerifyRequest,
+    session: Any | None = None,
+) -> dict[str, Any]:
+    # 站点身份优先从加密 payload 中读取，外层字段只作为 SDK 早期版本兼容兜底。
+    site_key = str(
+        plaintext.get("site_key")
+        or getattr(request_model, "site_key", None)
+        or getattr(session, "site_key", None)
+        or ""
+    )
+    action = str(
+        plaintext.get("action")
+        or getattr(request_model, "action_name", None)
+        or getattr(session, "action", None)
+        or DEFAULT_DEMO_ACTION
+    )
+    hostname = str(
+        plaintext.get("hostname")
+        or getattr(request_model, "hostname", None)
+        or getattr(session, "hostname", None)
+        or DEFAULT_DEMO_HOSTNAME
+    )
+
+    context = _validate_site_context(site_key=site_key, action=action, hostname=hostname)
+    if not context["ok"]:
+        return context
+
+    # 如果 token 创建时已经绑定过站点上下文，verify 阶段必须完全一致，防止跨站复用。
+    if session is not None:
+        session_site_key = getattr(session, "site_key", None)
+        session_action = getattr(session, "action", None)
+        session_hostname = getattr(session, "hostname", None)
+        if session_site_key and session_site_key != context["site_key"]:
+            return {**context, "ok": False, "reason": "site_context_mismatch"}
+        if session_action and session_action != context["action"]:
+            return {**context, "ok": False, "reason": "site_context_mismatch"}
+        if session_hostname and session_hostname != context["hostname"]:
+            return {**context, "ok": False, "reason": "site_context_mismatch"}
+
+    return context
+
+
+def _validate_site_context(*, site_key: str, action: str | None, hostname: str | None) -> dict[str, Any]:
+    result = site_registry.validate_site_context(
+        site_key=site_key,
+        action=action,
+        hostname=hostname,
+    )
+    return {
+        "ok": result.ok,
+        "reason": result.reason,
+        "site_key": result.site.site_key if result.site is not None else site_key,
+        "action": result.normalized_action,
+        "hostname": result.normalized_hostname,
+    }
+
+
+def _issue_verify_signature(
+    *,
+    captcha_token: str,
+    risk_score: float,
+    site_key: str | None = None,
+    action: str | None = None,
+    hostname: str | None = None,
+) -> str:
     verify_signature = f"vsig_{secrets.token_urlsafe(32)}"
     session_store.put_verify_signature(
         verify_signature=verify_signature,
         captcha_token=captcha_token,
         risk_score=risk_score,
         ttl_seconds=settings.verify_signature_ttl_seconds,
+        site_key=site_key,
+        action=normalize_action(action),
+        hostname=normalize_hostname(hostname),
     )
     return verify_signature
 
@@ -697,6 +912,14 @@ def _extract_slider_x(plaintext: dict[str, Any] | None) -> float | None:
         return float(plaintext["slider_x"])
     except (TypeError, ValueError):
         return None
+
+
+def _format_challenge_ts(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
 
 
 def _precheck_failed(reason: str) -> CaptchaPrecheckResponse:

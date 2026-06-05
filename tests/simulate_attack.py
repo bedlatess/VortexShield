@@ -122,7 +122,7 @@ def open_login_page(page: Page, url: str) -> None:
 
 
 def force_slider_challenge(page: Page) -> None:
-    """等待或强制刷新到 SLIDER 挑战。
+    """等待或强制刷新到 SLIDER 滑块校验流程。
 
     由于 Playwright 环境通常会命中 webdriver 探针，正常会直接降级为 SLIDER。
     如果页面短暂处于 SILENT/CHECKBOX 状态，则等待 SDK 完成刷新。
@@ -130,10 +130,10 @@ def force_slider_challenge(page: Page) -> None:
 
     try:
         page.wait_for_selector(".vsec-knob", timeout=12_000)
-        print("[*] 已进入滑块挑战。")
+        print("[*] 已进入滑块校验流程。")
     except PlaywrightTimeoutError as exc:
         notice = safe_text(page, "#notice")
-        raise RuntimeError(f"未能进入滑块挑战，当前提示: {notice}") from exc
+        raise RuntimeError(f"未能进入滑块校验流程，当前提示: {notice}") from exc
 
 
 def uniform_drag(page: Page, distance: int) -> None:
