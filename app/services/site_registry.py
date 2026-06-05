@@ -5,8 +5,7 @@ import json
 import os
 import secrets
 import tempfile
-from dataclasses import asdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
@@ -135,6 +134,40 @@ class InMemorySiteRegistry:
                     self._persist_locked()
                     return site, secret
         raise RuntimeError("site_key_generation_failed")
+
+    def set_enabled(self, site_key: str, enabled: bool) -> SiteConfig | None:
+        normalized_key = str(site_key or "").strip()
+        with self._lock:
+            site = self._sites.get(normalized_key)
+            if site is None:
+                return None
+            updated = replace(site, enabled=enabled)
+            self._sites[normalized_key] = updated
+            self._persist_locked()
+            return updated
+
+    def delete_site(self, site_key: str) -> SiteConfig | None:
+        normalized_key = str(site_key or "").strip()
+        # 演示站点用于本地联调和线上探针，禁止在管理面板中删除，避免一键接入样例失效。
+        if normalized_key == DEFAULT_DEMO_SITE_KEY:
+            raise ValueError("demo_site_cannot_be_deleted")
+        with self._lock:
+            site = self._sites.pop(normalized_key, None)
+            if site is not None:
+                self._persist_locked()
+            return site
+
+    def rotate_secret(self, site_key: str) -> tuple[SiteConfig, str] | None:
+        normalized_key = str(site_key or "").strip()
+        with self._lock:
+            site = self._sites.get(normalized_key)
+            if site is None:
+                return None
+            secret = f"vsec_secret_{secrets.token_urlsafe(32)}"
+            updated = replace(site, secret_hash=hash_secret(secret))
+            self._sites[normalized_key] = updated
+            self._persist_locked()
+            return updated, secret
 
     def validate_site_context(
         self,

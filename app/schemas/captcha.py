@@ -144,3 +144,44 @@ class SiteAdminCreateResponse(BaseModel):
     code: int = 200
     msg: str = "success"
     data: SiteAdminCreateData | None = None
+
+
+class AdminLoginRequest(BaseModel):
+    admin_token: str = Field(..., min_length=1, description="VortexShield project administrator token.")
+
+
+class AdminLoginResponse(BaseModel):
+    code: int = 200
+    msg: str = "success"
+    data: dict[str, str] | None = None
+
+
+class AdminSiteMutationResponse(BaseModel):
+    code: int = 200
+    msg: str = "success"
+    data: SiteAdminData | None = None
+
+
+class AdminSecretRotateData(SiteAdminData):
+    secret: str = Field(..., description="New private secret returned once after rotation.")
+
+
+class AdminSecretRotateResponse(BaseModel):
+    code: int = 200
+    msg: str = "success"
+    data: AdminSecretRotateData | None = None
+
+
+class AdminStatsData(BaseModel):
+    site_count: int
+    enabled_site_count: int
+    disabled_site_count: int
+    storage_path: str
+    session_backend: str
+    admin_cookie_name: str
+
+
+class AdminStatsResponse(BaseModel):
+    code: int = 200
+    msg: str = "success"
+    data: AdminStatsData

@@ -13,7 +13,7 @@ def test_home_pages_render_without_conflicting_with_api_routes() -> None:
     assert home.status_code == 200
     assert "VortexShield" in home.text
     assert console.status_code == 200
-    assert "接入控制台" in console.text
+    assert "Access Console" in console.text
     assert "接入凭证中心" in console.text
     assert health.json() == {"status": "ok"}
 

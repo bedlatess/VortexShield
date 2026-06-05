@@ -153,14 +153,20 @@ Product home:
 http://127.0.0.1:48921/home
 ```
 
-API console:
+Access console:
 
 ```text
 http://127.0.0.1:48921/home/api
 ```
 
+Project administrator console:
+
+```text
+http://127.0.0.1:48921/home/admin/login
+```
+
 本地演示后台令牌为 `vsec_admin_demo`。生产部署请设置环境变量 `VSEC_ADMIN_TOKEN`
-为高强度随机值，否则不要开放 `/home/api` 到公网。
+为高强度随机值。`/home/admin/login` 是 VortexShield 项目管理员入口，不面向普通接入方开放。
 
 ### 3. Open Business Login Demo
 
@@ -234,10 +240,17 @@ secret  = vsec_secret_demo
 | `GET` | `/api/captcha/challenge` | 显式创建滑块拼合校验流程，主要用于调试和高风险升级 |
 | `POST` | `/api/captcha/verify` | 解密 Payload，校验滑块精度与轨迹风险，签发 `verify_signature` |
 | `POST` | `/api/siteverify` | 业务后端使用私有 `secret` 校验并一次性消费 `verify_signature` |
-| `GET` | `/home` | VortexShield 产品首页 |
-| `GET` | `/home/api` | API 创建与站点管理后台 |
+| `GET` | `/home` | VortexShield 科技风产品首页 |
+| `GET` | `/home/api` | 接入凭证中心，用于签发站点 siteKey / secret |
 | `GET` | `/home/api/sites` | 列出已配置站点 API |
 | `POST` | `/home/api/sites` | 创建站点 API，返回一次性展示的私有 `secret` |
+| `GET` | `/home/admin/login` | VortexShield 项目管理员登录页 |
+| `GET` | `/home/admin` | 项目管理员控制面板，管理站点启停、删除与 secret 轮换 |
+| `GET` | `/home/admin/api/sites` | 管理员 Cookie 鉴权后列出站点资产 |
+| `POST` | `/home/admin/api/sites/{site_key}/disable` | 停用站点 API |
+| `POST` | `/home/admin/api/sites/{site_key}/enable` | 启用站点 API |
+| `POST` | `/home/admin/api/sites/{site_key}/rotate-secret` | 轮换私有 secret，新 secret 只返回一次 |
+| `DELETE` | `/home/admin/api/sites/{site_key}` | 删除站点 API，演示站点受保护不可删除 |
 | `GET` | `/health` | 服务健康检查 |
 
 ## Docker Deployment
@@ -268,6 +281,8 @@ docker compose --profile redis up -d
 ```
 
 当前版本的验证码会话默认使用内存 Mock Session Store；生产多副本部署时建议切换为 Redis / Redis Cluster / DynamoDB 等集中式会话存储。控制台创建的站点 API 会持久化到 `data/site_registry.json`，Docker Compose 已挂载 `./data:/app/data`，避免服务重启后接入凭证丢失。
+
+管理员后台使用 `VSEC_ADMIN_TOKEN` 登录后签发 `HttpOnly + SameSite=Lax` Cookie，默认 2 小时过期。生产环境建议在 Nginx Proxy Manager / WAF 层额外限制 `/home/admin` 的访问来源。
 
 ## Red Team Simulation
 

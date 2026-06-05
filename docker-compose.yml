@@ -12,6 +12,7 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
       VSEC_SITE_REGISTRY_PATH: "/app/data/site_registry.json"
+      VSEC_ADMIN_TOKEN: "kcXi6tZ1GrtDrraerPhQJy5cQZLJD47isZFN7L4uXXeuGuQ725BF5"
       # Future Redis migration hook:
       # VSEC_SESSION_BACKEND: "redis"
       # REDIS_URL: "redis://redis:6379/0"
