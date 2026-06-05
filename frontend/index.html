@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VortexShield Turnstile Debug</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #111411;
+        --panel: #171c18;
+        --panel-2: #202720;
+        --line: #435247;
+        --text: #e8efe6;
+        --muted: #a9b6aa;
+        --accent: #a7f06f;
+        --accent-2: #54c6eb;
+        --danger: #ff776d;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+          var(--bg);
+        background-size: 36px 36px;
+        color: var(--text);
+        font-family: Cambria, "Microsoft YaHei", "Segoe UI", serif;
+        display: grid;
+        place-items: center;
+        padding: 28px;
+      }
+
+      main {
+        width: min(780px, 100%);
+        border: 1px solid var(--line);
+        background: color-mix(in srgb, var(--panel) 94%, black);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      }
+
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 18px;
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        padding: 18px 20px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        letter-spacing: 0;
+      }
+
+      .port {
+        color: var(--accent);
+        font: 700 14px Consolas, monospace;
+      }
+
+      .content {
+        display: grid;
+        gap: 16px;
+        padding: 20px;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 1px solid #6a846f;
+        background: #d8f7b4;
+        color: #101510;
+        font-weight: 800;
+        padding: 10px 16px;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.62;
+      }
+
+      label {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      input[type="checkbox"] {
+        accent-color: var(--accent);
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      #debug-status {
+        color: var(--muted);
+        font: 13px Consolas, monospace;
+      }
+
+      #debug-status.is-loading {
+        color: var(--accent-2);
+      }
+
+      #debug-status.is-success {
+        color: var(--accent);
+        font-weight: 800;
+      }
+
+      #debug-status.is-error {
+        color: var(--danger);
+        font-weight: 800;
+      }
+
+      pre {
+        margin: 0;
+        max-height: 240px;
+        overflow: auto;
+        padding: 14px;
+        background: #0c100d;
+        border: 1px solid var(--line);
+        color: #cfe8d0;
+        font: 12px Consolas, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>VortexShield Turnstile Debug</h1>
+        <div class="port">127.0.0.1:48921</div>
+      </header>
+      <section class="content">
+        <div class="toolbar">
+          <button id="start-btn" type="button">点击验证</button>
+          <label>
+            <input id="fake-bot" type="checkbox" />
+            模拟机器人环境
+          </label>
+          <span class="hint">正常环境无感通过；模拟机器人会降级为点选挑战。</span>
+        </div>
+        <div id="captcha-root"></div>
+        <div id="debug-status" class="is-loading">安全验证中...</div>
+        <pre id="debug-output">{}</pre>
+      </section>
+    </main>
+
+    <script src="./dist/vsec-sdk.js"></script>
+    <script src="./test-app.js"></script>
+  </body>
+</html>

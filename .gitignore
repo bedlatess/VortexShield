@@ -1,0 +1,38 @@
+# ========================
+# Python 基础与环境
+# ========================
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+
+# ========================
+# VortexShield 业务专有数据 (关键！)
+# ========================
+# 拦截风控日志：绝对不能把包含用户指纹和轨迹的日志传到 GitHub，涉及隐私合规
+logs/*
+!logs/.gitkeep
+*.jsonl
+
+# 拦截机器学习模型：.pkl 文件属于二进制大文件，且本地训练的无需上传（可由服务器自行训练）
+models/*.pkl
+!models/.gitkeep
+
+# ========================
+# 前端与自动化测试
+# ========================
+# 如果你装了 typescript 或 playwright，必定会产生这个黑洞文件夹
+node_modules/
+# Playwright 截图或测试缓存（如果有用到的话）
+test-results/
+
+# ========================
+# 操作系统与 IDE 缓存
+# ========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

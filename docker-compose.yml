@@ -1,0 +1,37 @@
+services:
+  vsec-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vortexshield/vsec-api:latest
+    container_name: vortexshield-api
+    restart: unless-stopped
+    ports:
+      - "48921:48921"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      # Future Redis migration hook:
+      # VSEC_SESSION_BACKEND: "redis"
+      # REDIS_URL: "redis://redis:6379/0"
+    # depends_on:
+    #   - redis
+
+  # Optional centralized session store for production clusters.
+  # The current code uses an in-memory Mock Session Store; keep this block ready
+  # for the Redis-backed store migration.
+  redis:
+    image: redis:7-alpine
+    container_name: vortexshield-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    profiles:
+      - redis
+
+volumes:
+  redis-data:
+
