@@ -6,7 +6,7 @@
 
   const sdk = new window.CaptchaSDK({
     container: "#captcha-root",
-    apiBaseUrl: "http://127.0.0.1:48921",
+    apiBaseUrl: "https://vsec.pawn.eu.org",
     simulateBot: false,
     onSilentPass(signature, response) {
       console.log("Silent Precheck Pass", response);

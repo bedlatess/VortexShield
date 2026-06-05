@@ -2,14 +2,21 @@ import base64
 import json
 import secrets
 
+import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi.testclient import TestClient
 
 from app.core.enums import CaptchaType
+from app.api.routes import captcha as captcha_routes
 from app.main import app
 from app.services.session_store import session_store
+
+
+@pytest.fixture(autouse=True)
+def _clear_rate_limit_buckets() -> None:
+    captcha_routes._verify_rate_buckets.clear()
 
 
 def _encrypt_payload(plaintext: dict, rsa_public_key_pem: str) -> dict:
@@ -257,26 +264,31 @@ def test_verify_slider_success_issues_signature_and_prevents_replay() -> None:
     assert replay.json()["data"]["reason"] == "challenge_expired_or_not_found"
 
 
-def test_verify_rejects_wrong_slider_position() -> None:
+def test_verify_rejects_slider_when_overlap_below_relaxed_threshold() -> None:
     client = TestClient(app)
     challenge, session = _make_challenge(client)
-    wrong_x = session.slider_answer.target_x - 9
+    wrong_x = session.slider_answer.target_x - 20
     plaintext = _slider_plaintext(challenge["captcha_token"], wrong_x)
 
     response = _verify(client, challenge["captcha_token"], challenge["rsa_public_key"], plaintext)
-    assert response.json()["data"]["reason"] == "slider_position_mismatch"
+    body = response.json()
+    assert body["data"]["reason"] == "slider_overlap_ratio_too_low"
+    assert body["data"]["features"]["overlap_ratio"] < 0.70
 
 
-def test_verify_accepts_slider_position_within_eight_pixel_tolerance() -> None:
+def test_verify_accepts_low_risk_human_slider_with_relaxed_overlap() -> None:
     client = TestClient(app)
     challenge, session = _make_challenge(client)
-    near_x = session.slider_answer.target_x + 8
+    near_x = session.slider_answer.target_x + 15
     plaintext = _slider_plaintext(challenge["captcha_token"], near_x)
 
     response = _verify(client, challenge["captcha_token"], challenge["rsa_public_key"], plaintext)
+    body = response.json()
 
-    assert response.json()["code"] == 200
-    assert response.json()["data"]["verify_signature"].startswith("vsig_")
+    assert body["code"] == 200
+    assert body["data"]["verify_signature"].startswith("vsig_")
+    assert body["data"]["features"]["overlap_ratio"] >= 0.70
+    assert body["data"]["features"]["required_overlap"] == 0.70
 
 
 def test_verify_rejects_payload_captcha_type_mismatch() -> None:
@@ -341,3 +353,23 @@ def test_verify_handles_decrypt_failure_without_crashing() -> None:
     assert response.status_code == 200
     assert response.json()["code"] == 403
     assert response.json()["data"]["reason"] == "payload_decrypt_failed"
+
+
+def test_verify_rate_limits_same_ip_after_fifteen_requests() -> None:
+    client = TestClient(app)
+
+    for _index in range(15):
+        response = client.post(
+            "/api/captcha/verify",
+            json={"captcha_token": "missing-token", "payload": {}},
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["reason"] == "challenge_expired_or_not_found"
+
+    response = client.post(
+        "/api/captcha/verify",
+        json={"captcha_token": "missing-token", "payload": {}},
+    )
+
+    assert response.status_code == 429
+    assert response.json()["data"]["reason"] == "rate_limited"

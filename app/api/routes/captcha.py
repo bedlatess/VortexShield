@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import secrets
-from typing import Any
+import time
+from collections import defaultdict, deque
+from typing import Any, Deque
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, status
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.enums import CaptchaType, RiskLevel
@@ -31,6 +34,15 @@ from app.services.session_store import SliderAnswer, session_store
 
 router = APIRouter()
 settings = get_settings()
+
+PIECE_WIDTH = 53.0
+STANDARD_OVERLAP_RATIO = 0.85
+HUMAN_FRIENDLY_OVERLAP_RATIO = 0.70
+HIGH_RISK_SCORE_THRESHOLD = 0.70
+LOW_RISK_SCORE_THRESHOLD = 0.30
+VERIFY_RATE_LIMIT = 15
+VERIFY_RATE_WINDOW_SECONDS = 60.0
+_verify_rate_buckets: dict[str, Deque[float]] = defaultdict(deque)
 
 
 @router.get("/precheck-key", response_model=PrecheckKeyResponse)
@@ -147,7 +159,10 @@ def create_captcha_challenge() -> CaptchaChallengeResponse:
 
 
 @router.post("/verify", response_model=CaptchaVerifyResponse)
-def verify_captcha(request: CaptchaVerifyRequest) -> CaptchaVerifyResponse:
+def verify_captcha(
+    payload: CaptchaVerifyRequest,
+    request: Request,
+) -> CaptchaVerifyResponse | JSONResponse:
     """校验 step-up challenge。
 
     Phase 6 已废弃旧版“四字符点选顺序”方案。本接口现在只接受滑块类 payload：
@@ -159,7 +174,24 @@ def verify_captcha(request: CaptchaVerifyRequest) -> CaptchaVerifyResponse:
     }
     """
 
-    session = session_store.get(request.captcha_token)
+    client_ip = _get_client_ip(request)
+    if not _allow_verify_request(client_ip):
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "code": 429,
+                "msg": "too_many_requests",
+                "data": {
+                    "verify_signature": None,
+                    "expires_in": None,
+                    "risk_score": 1.0,
+                    "reason": "rate_limited",
+                    "features": {"client_ip": client_ip, "limit_per_minute": VERIFY_RATE_LIMIT},
+                },
+            },
+        )
+
+    session = session_store.get(payload.captcha_token)
     if session is None:
         return _verify_failed_with_log(
             "challenge_expired_or_not_found",
@@ -168,7 +200,7 @@ def verify_captcha(request: CaptchaVerifyRequest) -> CaptchaVerifyResponse:
         )
 
     try:
-        plaintext = decrypt_hybrid_payload(request.payload, session.rsa_private_key_pem)
+        plaintext = decrypt_hybrid_payload(payload.payload, session.rsa_private_key_pem)
     except PayloadDecryptError:
         return _verify_failed_with_log(
             "payload_decrypt_failed",
@@ -176,7 +208,7 @@ def verify_captcha(request: CaptchaVerifyRequest) -> CaptchaVerifyResponse:
             plaintext=None,
         )
 
-    if plaintext.get("captcha_token") != request.captcha_token:
+    if plaintext.get("captcha_token") != payload.captcha_token:
         return _verify_failed_with_log(
             "payload_token_mismatch",
             captcha_type=session.captcha_type,
@@ -201,10 +233,10 @@ def verify_captcha(request: CaptchaVerifyRequest) -> CaptchaVerifyResponse:
         )
 
     if captcha_type == CaptchaType.SILENT:
-        return _verify_silent_challenge(request.captcha_token)
+        return _verify_silent_challenge(payload.captcha_token)
 
     if captcha_type == CaptchaType.CLICK_CHECKBOX:
-        return _verify_checkbox_challenge(request.captcha_token, plaintext, captcha_type)
+        return _verify_checkbox_challenge(payload.captcha_token, plaintext, captcha_type)
 
     if captcha_type != CaptchaType.SLIDER or session.slider_answer is None:
         return _verify_failed_with_log(
@@ -213,38 +245,62 @@ def verify_captcha(request: CaptchaVerifyRequest) -> CaptchaVerifyResponse:
             plaintext=plaintext,
         )
 
-    slider_result = _verify_slider_position(plaintext, session.slider_answer)
-    if not slider_result["ok"]:
+    position_result = _calculate_slider_overlap(plaintext, session.slider_answer)
+    if not position_result["ok"]:
         return _verify_failed_with_log(
-            slider_result["reason"],
+            position_result["reason"],
             captcha_type=captcha_type,
             plaintext=plaintext,
-            features=slider_result.get("features"),
+            features=position_result.get("features"),
         )
 
-    risk_result = _evaluate_tracks_or_fail(plaintext)
+    risk_result = _evaluate_tracks_or_fail(
+        plaintext,
+        bot_score_threshold=HIGH_RISK_SCORE_THRESHOLD,
+    )
     if not risk_result["ok"]:
+        features = _merge_features(
+            risk_result.get("features"),
+            position_result.get("features"),
+        )
         return _verify_failed_with_log(
             risk_result["reason"],
             captcha_type=captcha_type,
             plaintext=plaintext,
             risk_score=risk_result.get("risk_score"),
-            features=risk_result.get("features"),
+            features=features,
+            overlap_ratio=position_result.get("overlap_ratio"),
+        )
+
+    dynamic_result = _decide_slider_dynamic_tolerance(
+        position_result=position_result,
+        risk_score=float(risk_result["risk_score"]),
+        risk_features=risk_result.get("features"),
+    )
+    if not dynamic_result["ok"]:
+        return _verify_failed_with_log(
+            dynamic_result["reason"],
+            captcha_type=captcha_type,
+            plaintext=plaintext,
+            risk_score=float(risk_result["risk_score"]),
+            features=dynamic_result.get("features"),
+            overlap_ratio=position_result.get("overlap_ratio"),
         )
 
     verify_signature = _issue_verify_signature(
-        captcha_token=request.captcha_token,
+        captcha_token=payload.captcha_token,
         risk_score=float(risk_result["risk_score"]),
     )
-    session_store.delete(request.captcha_token)
+    session_store.delete(payload.captcha_token)
     session_store.prune_expired()
 
     return _verify_success_response(
         verify_signature=verify_signature,
         risk_score=float(risk_result["risk_score"]),
-        features=risk_result.get("features"),
+        features=dynamic_result.get("features"),
         captcha_type=captcha_type,
         plaintext=plaintext,
+        overlap_ratio=position_result.get("overlap_ratio"),
     )
 
 
@@ -378,11 +434,15 @@ def _verify_checkbox_challenge(
     )
 
 
-def _verify_slider_position(plaintext: dict[str, Any], answer: SliderAnswer) -> dict[str, Any]:
-    """校验滑块最终 X 坐标。
+def _calculate_slider_overlap(plaintext: dict[str, Any], answer: SliderAnswer) -> dict[str, Any]:
+    """计算滑块与真实缺口的面积重合率。
 
-    只比较 X 轴是因为滑块 UI 通常固定在同一水平轨道上；Y 轴用于生成缺口和拼图块，
-    不作为拖动答案。容差用于吸收前端 CSS 缩放、devicePixelRatio 和人工拖动误差。
+    旧逻辑使用 abs(slider_x - target_x) <= tolerance，体验上接近“像素级卡尺”。
+    新逻辑改为面积重合率：
+        overlap_ratio = max(0, 1 - abs(slider_x - target_x) / PIECE_WIDTH)
+
+    这里只负责产生判定指标，不直接按坐标拒绝。最终是否放行要结合轨迹风险分值，
+    由 _decide_slider_dynamic_tolerance 统一决策。
     """
 
     try:
@@ -390,24 +450,97 @@ def _verify_slider_position(plaintext: dict[str, Any], answer: SliderAnswer) -> 
     except (KeyError, TypeError, ValueError) as exc:
         return {"ok": False, "reason": "malformed_slider_x", "features": {"error": str(exc)}}
 
-    tolerance = settings.slider_x_tolerance_px
     delta = abs(slider_x - float(answer.target_x))
-    if delta > tolerance:
+    overlap_ratio = max(0.0, 1.0 - delta / PIECE_WIDTH)
+    features = {
+        "actual_x": round(slider_x, 3),
+        "target_x": answer.target_x,
+        "delta": round(delta, 3),
+        "piece_width": PIECE_WIDTH,
+        "overlap_ratio": round(overlap_ratio, 6),
+        "standard_overlap_required": STANDARD_OVERLAP_RATIO,
+        "human_friendly_overlap_required": HUMAN_FRIENDLY_OVERLAP_RATIO,
+    }
+    return {
+        "ok": True,
+        "reason": "overlap_calculated",
+        "overlap_ratio": overlap_ratio,
+        "features": features,
+    }
+
+
+def _decide_slider_dynamic_tolerance(
+    *,
+    position_result: dict[str, Any],
+    risk_score: float,
+    risk_features: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """基于轨迹风险分值动态选择滑块重合率门槛。
+
+    决策树：
+    - risk_score >= 0.7：高危机器轨迹，即使命中缺口也拒绝。
+    - risk_score <= 0.3：优质人类轨迹，重合率 >= 0.70 即放行。
+    - 其余模糊轨迹：使用标准重合率 >= 0.85。
+    """
+
+    overlap_ratio = float(position_result.get("overlap_ratio", 0.0))
+    position_features = position_result.get("features")
+
+    if risk_score >= HIGH_RISK_SCORE_THRESHOLD:
         return {
             "ok": False,
-            "reason": "slider_position_mismatch",
-            "features": {
-                "actual_x": round(slider_x, 3),
-                "target_x": answer.target_x,
-                "delta": round(delta, 3),
-                "tolerance": tolerance,
-            },
+            "reason": "high_risk_slider_trajectory",
+            "features": _merge_features(
+                risk_features,
+                position_features,
+                {
+                    "risk_score": round(risk_score, 6),
+                    "risk_threshold": HIGH_RISK_SCORE_THRESHOLD,
+                    "dynamic_decision": "reject_high_risk",
+                },
+            ),
+        }
+
+    required_overlap = (
+        HUMAN_FRIENDLY_OVERLAP_RATIO
+        if risk_score <= LOW_RISK_SCORE_THRESHOLD
+        else STANDARD_OVERLAP_RATIO
+    )
+    if overlap_ratio < required_overlap:
+        return {
+            "ok": False,
+            "reason": "slider_overlap_ratio_too_low",
+            "features": _merge_features(
+                risk_features,
+                position_features,
+                {
+                    "risk_score": round(risk_score, 6),
+                    "required_overlap": required_overlap,
+                    "dynamic_decision": (
+                        "low_risk_relaxed_reject"
+                        if risk_score <= LOW_RISK_SCORE_THRESHOLD
+                        else "standard_overlap_reject"
+                    ),
+                },
+            ),
         }
 
     return {
         "ok": True,
         "reason": "passed",
-        "features": {"delta": round(delta, 3), "tolerance": tolerance},
+        "features": _merge_features(
+            risk_features,
+            position_features,
+            {
+                "risk_score": round(risk_score, 6),
+                "required_overlap": required_overlap,
+                "dynamic_decision": (
+                    "low_risk_relaxed_pass"
+                    if risk_score <= LOW_RISK_SCORE_THRESHOLD
+                    else "standard_overlap_pass"
+                ),
+            },
+        ),
     }
 
 
@@ -419,7 +552,11 @@ def _parse_payload_captcha_type(plaintext: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "reason": "unsupported_captcha_type"}
 
 
-def _evaluate_tracks_or_fail(plaintext: dict[str, Any]) -> dict[str, Any]:
+def _evaluate_tracks_or_fail(
+    plaintext: dict[str, Any],
+    *,
+    bot_score_threshold: float = 0.65,
+) -> dict[str, Any]:
     tracks = plaintext.get("tracks")
     fingerprint = plaintext.get("fingerprint")
     if not isinstance(tracks, list):
@@ -428,17 +565,18 @@ def _evaluate_tracks_or_fail(plaintext: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "reason": "malformed_fingerprint"}
 
     risk_result = extract_trajectory_features(tracks, fingerprint)
-    if risk_result["is_bot"]:
+    risk_score = float(risk_result["score"])
+    if risk_result["is_bot"] and risk_score >= bot_score_threshold:
         return {
             "ok": False,
             "reason": risk_result["reason"],
-            "risk_score": float(risk_result["score"]),
+            "risk_score": risk_score,
             "features": risk_result.get("features"),
         }
 
     return {
         "ok": True,
-        "risk_score": float(risk_result["score"]),
+        "risk_score": risk_score,
         "features": risk_result.get("features"),
     }
 
@@ -461,6 +599,7 @@ def _verify_success_response(
     features: dict[str, Any] | None,
     captcha_type: CaptchaType | str | None,
     plaintext: dict[str, Any] | None,
+    overlap_ratio: float | None = None,
 ) -> CaptchaVerifyResponse:
     _log_verify_event(
         captcha_type=captcha_type,
@@ -468,6 +607,7 @@ def _verify_success_response(
         risk_score=risk_score,
         is_passed=True,
         reason="passed",
+        overlap_ratio=overlap_ratio,
     )
     return CaptchaVerifyResponse(
         code=200,
@@ -489,6 +629,7 @@ def _verify_failed_with_log(
     plaintext: dict[str, Any] | None,
     risk_score: float | None = None,
     features: dict[str, Any] | None = None,
+    overlap_ratio: float | None = None,
 ) -> CaptchaVerifyResponse:
     _log_verify_event(
         captcha_type=captcha_type,
@@ -496,6 +637,7 @@ def _verify_failed_with_log(
         risk_score=risk_score,
         is_passed=False,
         reason=reason,
+        overlap_ratio=overlap_ratio,
     )
     return _verify_failed(reason, risk_score=risk_score, features=features)
 
@@ -507,6 +649,7 @@ def _log_verify_event(
     risk_score: float | None,
     is_passed: bool,
     reason: str,
+    overlap_ratio: float | None = None,
 ) -> None:
     log_trajectory_event_async(
         captcha_type=str(captcha_type) if captcha_type is not None else None,
@@ -515,7 +658,45 @@ def _log_verify_event(
         risk_score=risk_score,
         is_passed=is_passed,
         reason=reason,
+        overlap_ratio=round(overlap_ratio, 6) if isinstance(overlap_ratio, float) else None,
+        slider_x=_extract_slider_x(plaintext),
     )
+
+
+def _merge_features(*parts: dict[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for part in parts:
+        if isinstance(part, dict):
+            merged.update(part)
+    return merged
+
+
+def _get_client_ip(request: Request) -> str:
+    # 生产环境如果由 Nginx / Cloudflare 代理，应确保只信任可信代理写入的 X-Forwarded-For。
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
+
+
+def _allow_verify_request(client_ip: str) -> bool:
+    now = time.monotonic()
+    bucket = _verify_rate_buckets[client_ip]
+    while bucket and now - bucket[0] >= VERIFY_RATE_WINDOW_SECONDS:
+        bucket.popleft()
+    if len(bucket) >= VERIFY_RATE_LIMIT:
+        return False
+    bucket.append(now)
+    return True
+
+
+def _extract_slider_x(plaintext: dict[str, Any] | None) -> float | None:
+    if not isinstance(plaintext, dict) or "slider_x" not in plaintext:
+        return None
+    try:
+        return float(plaintext["slider_x"])
+    except (TypeError, ValueError):
+        return None
 
 
 def _precheck_failed(reason: str) -> CaptchaPrecheckResponse:

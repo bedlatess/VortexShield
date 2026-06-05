@@ -26,6 +26,8 @@ PROTECTION_REASONS = {
     "automation_probe_detected": "环境探针命中 navigator.webdriver / 自动化特征",
     "static_uniform_motion_detected": "探测到绝对匀速直线运动",
     "teleportation_detected": "探测到瞬时坐标跃迁/机器代滑",
+    "slider_overlap_ratio_too_low": "滑块面积重合率未达到动态容错阈值",
+    "high_risk_slider_trajectory": "滑块轨迹风险分过高，即使命中缺口也拒绝",
     "slider_position_mismatch": "滑块拼接坐标未命中真实缺口",
     "payload_decrypt_failed": "加密包认证失败或被篡改",
 }
@@ -178,7 +180,7 @@ def js_teleport(page: Page, distance: int) -> None:
 
     对应 risk_engine.py 的硬拦截规则：
     - 如果前端成功提交，轨迹点之间会出现极大的瞬时速度，命中 teleportation_detected；
-    - 如果提交失败或坐标不准，则命中 slider_position_mismatch；
+    - 如果提交失败或坐标不准，则命中 slider_overlap_ratio_too_low；
     - 自动化环境也会先被 automation_probe_detected 拦截。
     """
 

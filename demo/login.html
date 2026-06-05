@@ -381,7 +381,7 @@
 
       const sdk = new window.CaptchaSDK({
         container: "#vsec-captcha-container",
-        apiBaseUrl: "http://127.0.0.1:48921",
+        apiBaseUrl: "https://vsec.pawn.eu.org",
         onSuccess(signature) {
           signatureInput.value = signature;
           notice.className = "notice";
