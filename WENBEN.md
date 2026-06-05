@@ -70,10 +70,11 @@ overlap_ratio = max(0, 1 - abs(slider_x - target_x) / piece_width)
 - 防投毒过滤器。
 - 10MB 日志轮转。
 - 最多保留 5 个备份文件。
+- 真人正确对齐与真人未对齐的引导样本生成脚本。
 - 基于 `RandomForestClassifier` 的训练脚本。
 - 模型输出到 `models/vsec_rf_model.pkl`。
 
-未来可以逐步让机器学习模型接管部分风险判定逻辑，从硬编码规则演进为规则与模型结合的风控体系。
+引导样本通过 `scripts/seed_training_logs.py` 写入，并使用 `bootstrap_human_passed`、`bootstrap_human_slider_miss` 等原因字段与真实生产样本区分。未来可以逐步让机器学习模型接管部分风险判定逻辑，从硬编码规则演进为规则与模型结合的风控体系。
 
 ## 3. 当前系统架构
 

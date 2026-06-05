@@ -39,6 +39,12 @@ FEATURE_COLUMNS = [
     "up_count",
 ]
 
+HUMAN_BEHAVIOR_REASONS = {
+    "bootstrap_human_passed",
+    "bootstrap_human_slider_miss",
+    "slider_overlap_ratio_too_low",
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -249,17 +255,30 @@ def zero_features() -> dict[str, float]:
 
 
 def infer_label(record: dict[str, Any]) -> int:
+    reason = str(record.get("reason") or "")
+    risk_score = record.get("risk_score")
+    try:
+        score = float(risk_score)
+    except (TypeError, ValueError):
+        score = None
+
+    # 风控模型学习的是“行为是否像真人”，不是“拼图是否成功”。
+    # 因此真人拖歪导致的最终验证失败，仍应作为 human-like 样本参与训练；
+    # 真正的 Bot/异常样本由高 risk_score 或自动化/瞬移/匀速等 reason 标记出来。
+    if reason in HUMAN_BEHAVIOR_REASONS:
+        return 0
+    if score is not None:
+        if score >= 0.65:
+            return 1
+        if score <= 0.30:
+            return 0
+
     is_passed = record.get("is_passed")
     if is_passed is True:
         return 0
     if is_passed is False:
         return 1
-
-    risk_score = record.get("risk_score")
-    try:
-        return 1 if float(risk_score) >= 0.65 else 0
-    except (TypeError, ValueError):
-        return 1
+    return 1
 
 
 def ensure_training_volume(

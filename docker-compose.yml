@@ -18,6 +18,8 @@ services:
       # REDIS_URL: "redis://redis:6379/0"
     volumes:
       - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
     # depends_on:
     #   - redis
 
